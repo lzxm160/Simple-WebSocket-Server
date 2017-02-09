@@ -14,50 +14,57 @@ namespace SimpleWeb {
                 const std::string& cert_file=std::string(), const std::string& private_key_file=std::string(), 
                 const std::string& verify_file=std::string()) : 
                 SocketClientBase<WSS>::SocketClientBase(server_port_path, 443),
-                asio_context(boost::asio::ssl::context::sslv23) {
-            if(verify_certificate)
-                asio_context.set_verify_mode(boost::asio::ssl::verify_peer);
-            else
-                asio_context.set_verify_mode(boost::asio::ssl::verify_none);
-            
+                context(boost::asio::ssl::context::tlsv12) {
             if(cert_file.size()>0 && private_key_file.size()>0) {
-                asio_context.use_certificate_chain_file(cert_file);
-                asio_context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
+                context.use_certificate_chain_file(cert_file);
+                context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
             }
             
+            if(verify_certificate)
+                context.set_verify_callback(boost::asio::ssl::rfc2818_verification(host));
+            
             if(verify_file.size()>0)
-                asio_context.load_verify_file(verify_file);
-
+                context.load_verify_file(verify_file);
+            else
+                context.set_default_verify_paths();
+            
+            if(verify_file.size()>0 || verify_certificate)
+                context.set_verify_mode(boost::asio::ssl::verify_peer);
+            else
+                context.set_verify_mode(boost::asio::ssl::verify_none);
         };
 
-    private:
-        boost::asio::ssl::context asio_context;
+    protected:
+        boost::asio::ssl::context context;
         
         void connect() {
             boost::asio::ip::tcp::resolver::query query(host, std::to_string(port));
             
-            asio_resolver.async_resolve(query, [this]
+            resolver->async_resolve(query, [this]
                     (const boost::system::error_code &ec, boost::asio::ip::tcp::resolver::iterator it){
                 if(!ec) {
-                    connection=std::unique_ptr<Connection>(new Connection(new WSS(asio_io_service, asio_context)));
+                    connection=std::shared_ptr<Connection>(new Connection(new WSS(*io_service, context)));
                     
                     boost::asio::async_connect(connection->socket->lowest_layer(), it, [this]
-                            (const boost::system::error_code &ec, boost::asio::ip::tcp::resolver::iterator it){
+                            (const boost::system::error_code &ec, boost::asio::ip::tcp::resolver::iterator /*it*/){
                         if(!ec) {
+                            boost::asio::ip::tcp::no_delay option(true);
+                            connection->socket->lowest_layer().set_option(option);
+                            
                             connection->socket->async_handshake(boost::asio::ssl::stream_base::client, 
                                     [this](const boost::system::error_code& ec) {
                                 if(!ec)
                                     handshake();
-                                else
-                                    throw std::invalid_argument(ec.message());
+                                else if(on_error)
+                                    on_error(ec);
                             });
                         }
-                        else
-                            throw std::invalid_argument(ec.message());
+                        else if(on_error)
+                            on_error(ec);
                     });
                 }
-                else
-                    throw std::invalid_argument(ec.message());
+                else if(on_error)
+                    on_error(ec);
             });
         }
     };
